@@ -60,6 +60,7 @@
 #include "sfm/map/Mapper.h"
 #include "sfm/map/MetricGauge.h"
 #include "sfm/map/Orient.h"
+#include "sfm/rs/Apply.h"
 #include "sfm/map/SensorGauge.h"
 #include "sfm/map/Merge.h"
 
@@ -2465,6 +2466,37 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
                 {(long long)est.images, (long long)(est.images * (est.images - 1) / 2)});
     }
 
+    // ---- 1b. rolling shutter: keypoints corrected in place, once ----
+    if (in.rolling_shutter && rs::alreadyApplied(featdir.string()) && est.reused != est.images) {
+        std::fprintf(stderr, "%s holds corrected and freshly extracted features; run again with "
+                             "--reuse-features redo\n", featdir.string().c_str());
+        { r.exit_code = 1; return r; }
+    }
+    if (in.rolling_shutter && !rs::alreadyApplied(featdir.string())) {
+        std::vector<FeatureSet> raw_feats;
+        MatchesDatabase raw;
+        MatchStats raw_stats;
+        VerifyCalibration raw_calib;
+        raw_calib.setup = cfg.camera;
+        const SensorCaptures raw_sensors = loadSensorCaptures(cfg, false);
+        raw_calib.sensors = &raw_sensors;
+        if (int rc = matchFeatureDir(featdir.string(), cfg, mode, /*verify=*/false, raw_feats, raw,
+                                     raw_stats, &raw_calib)) {
+            r.exit_code = rc;
+            return r;
+        }
+        raw_feats.clear();
+        rs::Options rs_opt;
+        rs_opt.threads = cfg.threads;
+        std::string rs_err;
+        if (!rs::applyToFeatureDir(raw, featdir.string(), featdir.string(), rs_opt, _imagedir,
+                                   in.rolling_shutter_images, 95, verbose ? stdout : nullptr,
+                                   rs_err)) {
+            std::fprintf(stderr, "rolling shutter: %s\n", rs_err.c_str());
+            { r.exit_code = 2; return r; }
+        }
+    }
+
     // ---- 2. match + geometric verification ----
     t0 = now();
     std::vector<FeatureSet> feats;
@@ -2866,6 +2898,15 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
         if (a == "--progress-dir") {
             if (i + 1 >= argc) return "--progress-dir: missing value";
             out.progress_dir = args[(size_t)++i];
+            continue;
+        }
+        if (a == "--rolling-shutter") {
+            out.in.rolling_shutter = true;
+            continue;
+        }
+        if (a == "--rolling-shutter-images") {
+            if (i + 1 >= argc) return "--rolling-shutter-images: missing value";
+            out.in.rolling_shutter_images = args[(size_t)++i];
             continue;
         }
         // Claimed, not merely cleared: manifest_apply fills in anything the

@@ -310,6 +310,9 @@ struct AutoInputs {
     std::set<std::string> explicit_flags;
     // What the presets moved, reported in the run header.
     std::vector<PresetChange> preset_changes;
+    // sfm/rs/Apply.h, between extraction and matching; the directory is optional.
+    bool rolling_shutter = false;
+    std::string rolling_shutter_images;
 };
 
 struct AutoResult {
