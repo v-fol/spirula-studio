@@ -227,6 +227,27 @@ static int cmdManifestTest(int, char**) {
               "and then the manifest's mask_dir is what is used");
     }
 
+    // --rolling-shutter widens the inlier radius, unless --max-error is given.
+    {
+        AutoRequest plain, rs, given;
+        const std::vector<std::string> base = {dir + "/images", "-o", dir + "/out"};
+        std::vector<std::string> a = base, b = base;
+        a.push_back("--rolling-shutter");
+        b.insert(b.end(), {"--rolling-shutter", "--max-error", "4"});
+        check(parse_auto_args(base, plain).empty() && parse_auto_args(a, rs).empty() &&
+                  parse_auto_args(b, given).empty(),
+              "rolling-shutter runs parse");
+        check(plain.cfg.max_error == 3.0, "without it the radius stays 3");
+        check(rs.cfg.max_error == 10.0 && rs.cfg.mapper.max_reproj_error == 10.0 &&
+                  rs.cfg.twoview.ransac.max_error == 10.0,
+              "with it, 10 for verification and mapping");
+        bool logged = false;
+        for (const PresetChange& p : rs.in.preset_changes)
+            logged = logged || (p.flag == "max-error" && p.from == "3" && p.to == "10");
+        check(logged, "and the run log says so");
+        check(given.cfg.max_error == 4.0, "an explicit --max-error wins");
+    }
+
     // Sensors held back per capture and per folder: on unless said, and a
     // switch left on signs nothing, so earlier resume states still match.
     {

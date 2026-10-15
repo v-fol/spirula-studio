@@ -74,6 +74,38 @@ independent estimates of it differ.
 In `auto` the stage sits between extraction and matching: one unverified matching pass, the
 estimate, the feature files rewritten in place, then the pipeline as it was.
 
+## Inlier radius
+
+`auto --rolling-shutter` sets `--max-error` to 10 unless it is given. The estimate sees only
+sequence neighbours, so what it leaves is alike along a pass and different between passes flown
+the other way: against a model that holds the passes together, a photo is off by a smooth field
+of 2 to 12 px (median 5.7). At the default 3 px the mapper drops the matches between passes and
+each pass settles at its own height.
+
+Measured on a fixed-wing flight with no GPS (592 photos, 4056 x 3040, 87 ms read-out, 8 mm lens).
+Depth maps from OpenMVS on each model, each photo's compared with every other photo's over the
+level ground both see; lengths at a nominal 50 m flight height:
+
+| | 3 px | 10 px |
+|---|---|---|
+| Photos in the model | 541 (+ 62 in a second model) | 592 |
+| Overlapping photos from different passes sharing 20+ points | 45% | 79% |
+| Overlapping photo pairs whose ground differs by more than 1 m | 19.9% | 1.0% |
+| ... by more than 0.5 m | 27.0% | 4.3% |
+| Reprojection error, mean | 1.09 px | 2.45 px |
+
+The depth-map rows are from a 10 px run with `--prefilter-neighbors 128`; with the default 32 the
+sparse model came out the same (points shared, folds, camera heights). The higher reprojection
+error is the distortion the correction left, now in the residuals instead of the model's shape.
+
+Matching more pairs did not help: overlapping passes already had verified matches (median 159 per
+pair) that the mapper refused. `--pairs exhaustive` and `--prefilter-neighbors 128` at 3 px left
+the shared points where they were.
+
+Refining each photo's read-out terms against the 10 px model afterwards (pose and nine terms per
+photo with the points held, then bundle adjustment, three rounds) brought the reprojection error to
+0.95 px but the depth maps agreed no better. Not implemented.
+
 ## Measured
 
 Source build at `b9c8042` plus this stage, RTX 5090. Plain `auto` against `auto --rolling-shutter`,

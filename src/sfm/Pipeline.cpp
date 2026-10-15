@@ -2660,11 +2660,21 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     if (in.level_flight > 0) {
         LevelFlightOptions lo;
         lo.slope = in.level_flight;
+        // Shooting order is the natural order of the file names, as for the
+        // rolling-shutter stage.
+        std::vector<int> order(db.images.size());
+        for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return rs::naturalLess(db.images[a].name, db.images[b].name);
+        });
+        lo.sequence.assign(order.size(), -1);
+        for (size_t s = 0; s < order.size(); s++) lo.sequence[order[s]] = (int)s;
         level_flight = std::make_unique<LevelFlightPriors>(mapped, lo);
         if (verbose)
             std::printf("[map]     Level flight: camera heights tied to their %d nearest neighbours "
-                        "over the ground, sigma %.3f per unit of distance\n",
-                        lo.neighbours, lo.slope);
+                        "over the ground from other passes (over %d photos apart), sigma %.3f per "
+                        "unit of distance\n",
+                        lo.neighbours, lo.min_gap, lo.slope);
     }
     Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs,
                   level_flight ? static_cast<PriorSource*>(level_flight.get()) : mapped);
@@ -2826,6 +2836,9 @@ void RunContext::set_progress_dir(const std::string& dir) { progress::set_dir(di
 
 namespace {
 
+// --max-error under --rolling-shutter unless given.
+constexpr double kRollingShutterMaxError = 10.0;
+
 // --camera-model / --focal / --distortion: a bare value sets the dataset-wide
 // default (which is a table field), PREFIX=VALUE names one camera group
 // (which is not).
@@ -2979,6 +2992,17 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
         if (std::string err = manifest_apply(man, cfg, seen, imagedir); !err.empty())
             return manifest_path + ": " + err;
         if (!man.mask_dir.empty()) maskdir_explicit = true;
+    }
+    // The correction leaves each photo a few px off, alike along a pass and not between passes:
+    // at 3 px the mapper dropped the matches between neighbouring passes and they drifted apart
+    // in height by metres (docs/notes/rolling-shutter.md, "Inlier radius").
+    if (out.in.rolling_shutter && !seen.count("max-error") &&
+        cfg.max_error < kRollingShutterMaxError) {
+        char was[32], to[32];
+        std::snprintf(was, sizeof was, "%g", cfg.max_error);
+        std::snprintf(to, sizeof to, "%g", kRollingShutterMaxError);
+        moved.push_back({"max-error", was, to});
+        cfg.max_error = kRollingShutterMaxError;
     }
     if (std::string err = cfg.finalize(CMD_AUTO); !err.empty()) return err;
     if (std::string err = cfg.resolveDevice(); !err.empty()) return err;

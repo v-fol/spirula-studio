@@ -31,14 +31,17 @@ static Pose nadir(const Vec3& C, const Mat3& Rw) {
     return {R, {-t.x, -t.y, -t.z}};
 }
 
-// Three flight lines along X, 60 m apart, a photo every 40 m, 100 m up; line
-// `lifted` raised by `dz`. World = survey frame turned by Rw, scaled by s.
+// Three lines along X, 50 m apart, flown back and forth, a photo every 8 m, 100 m
+// up; line `lifted` raised by `dz`. World = survey frame turned by Rw, scaled by
+// s. Image ids follow the shooting order.
+static const int kPerLine = 20;
 static std::vector<PosedImage> survey(const Mat3& Rw, double s, int lifted = -1, double dz = 0) {
     std::vector<PosedImage> imgs;
     uint32_t id = 10;
     for (int line = 0; line < 3; line++)
-        for (int k = 0; k < 12; k++) {
-            const Vec3 local{40.0 * k, 60.0 * line, 100.0 + (line == lifted ? dz : 0.0)};
+        for (int k = 0; k < kPerLine; k++) {
+            const double x = 8.0 * (line % 2 ? kPerLine - 1 - k : k);
+            const Vec3 local{x, 50.0 * line, 100.0 + (line == lifted ? dz : 0.0)};
             PosedImage p;
             p.image = id++;
             p.pose = nadir(mul(Rw, local) * s, Rw);
@@ -56,15 +59,18 @@ static double residual(const PriorCentre& f, const std::vector<PosedImage>& imgs
     return (sum.z - f.b.z) / f.sigma.z;
 }
 
-static int line_of(uint32_t image) { return (int)((image - 10) / 12); }
+static int line_of(uint32_t image) { return (int)((image - 10) / kPerLine); }
 
 int cmdLevelFlightSelftest(int, char**) {
     LevelFlightOptions opt;
     opt.slope = 0.02;
     opt.neighbours = 6;
+    opt.min_gap = 10;
+    opt.sequence.assign(10 + 3 * kPerLine, -1);
+    for (int i = 0; i < 3 * kPerLine; i++) opt.sequence[10 + i] = i;
     const Mat3 turn = angleAxisToRotation(Vec3{0.3, -0.2, 0.9});
 
-    // ---- T1: a level survey: factors, all satisfied --------------------------
+    // ---- T1: a level survey: factors across the lines, all satisfied ---------
     {
         const std::vector<PosedImage> imgs = survey(turn, 0.37);
         PosePriors pr;
@@ -72,18 +78,28 @@ int cmdLevelFlightSelftest(int, char**) {
         const int n = levelFlightFactors(imgs, opt, pr, &st);
         printf("  T1: %d factors over %d cameras\n", n, st.images);
         check(st.nadir && n > 0 && n == (int)pr.centres.size(), "T1: factors made for a nadir survey");
-        bool shape = true, cross = false;
+        bool shape = true, across = true;
         double worst = 0;
         for (const PriorCentre& f : pr.centres) {
             shape = shape && f.n == 2 && f.sigma.x == 0 && f.sigma.y == 0 && f.sigma.z > 0 &&
                     !f.absolute();
-            cross = cross || line_of(f.img[0]) != line_of(f.img[1]);
+            across = across && line_of(f.img[0]) != line_of(f.img[1]);
             worst = std::max(worst, std::fabs(residual(f, imgs)));
         }
         check(shape, "T1: two-camera height factors, level axes free");
-        check(cross, "T1: some factors tie neighbouring flight lines");
+        check(across, "T1: every factor ties two flight lines, none along one");
         check(worst < 1e-9, "T1: a level survey satisfies every factor");
         check(!pr.hasAbsoluteCentres(), "T1: no absolute position stated");
+
+        // Without the shooting order, the nearest cameras are all on the same line.
+        LevelFlightOptions blind = opt;
+        blind.sequence.clear();
+        PosePriors pb;
+        levelFlightFactors(imgs, blind, pb);
+        int cross = 0;
+        for (const PriorCentre& f : pb.centres) cross += line_of(f.img[0]) != line_of(f.img[1]);
+        printf("  T1: without the order, %d of %zu factors cross a line\n", cross, pb.centres.size());
+        check(cross == 0, "T1: why the order is needed: dense lines tie only themselves");
     }
 
     // ---- T2: a lifted line shows only across the lines, at dz / sigma ---------
@@ -166,8 +182,13 @@ int cmdLevelFlightSelftest(int, char**) {
             LevelFlightStats st;
             // Image ids are BA indices here.
             std::vector<PosedImage> ba = imgs;
-            for (size_t i = 0; i < ba.size(); i++) ba[i].image = (uint32_t)i;
-            levelFlightFactors(ba, opt, pr, &st);
+            LevelFlightOptions o = opt;
+            o.sequence.assign(ba.size(), 0);
+            for (size_t i = 0; i < ba.size(); i++) {
+                ba[i].image = (uint32_t)i;
+                o.sequence[i] = (int)i;
+            }
+            levelFlightFactors(ba, o, pr, &st);
             BAProblem P;
             P.num_images = (uint32_t)ba.size();
             P.identityFrames();

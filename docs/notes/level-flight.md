@@ -25,8 +25,13 @@ nearly the same height. Per solve, from the posed cameras:
 
 - up is against the cameras' mean viewing direction; when that is shorter than `min_nadir` (0.8)
   of the camera count, the cameras do not look one way and nothing is stated;
-- each camera is tied to its `neighbours` (6) nearest over the ground, so neighbouring flight
-  lines are tied as well as consecutive photos;
+- each camera is tied to its `neighbours` (6) nearest over the ground **from other passes**: more
+  than `min_gap` (10) photos away in the shooting order (the natural order of the file names), and
+  to the side of the camera's own track (at least 30 degrees off its direction of travel, taken from
+  the shorter of its steps to the photos before and after it, so a line's end does not take the
+  jump to the next line as its direction). Along a line the photos are a few metres apart and the
+  images fix their heights best; tying the nearest cameras regardless of pass tied each camera to
+  its own line only, which fought the images and made the folds worse (measured, first version);
 - one factor per pair: `up . (c_i - c_j) ~ 0`, sigma `SLOPE * distance over the ground`, Huber as
   every other prior. The level axes carry no weight.
 

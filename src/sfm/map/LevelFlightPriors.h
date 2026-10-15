@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -22,8 +24,13 @@ struct LevelFlightOptions {
     // distance over the ground: 0.02 lets two cameras 50 m apart differ by 1 m
     // at one sigma. Huber past that, so a real climb costs little more.
     double slope = 0.02;
-    // Nearest cameras over the ground each camera is tied to.
+    // Nearest cameras over the ground each camera is tied to, from other passes.
     int neighbours = 6;
+    // Shooting order, sequence[image id] (empty: unknown). The images fix heights
+    // along a line best, so a camera is tied only to cameras more than `min_gap`
+    // photos away: the neighbouring lines, which nothing else holds in height.
+    std::vector<int> sequence;
+    int min_gap = 10;
     // The cameras' mean viewing direction must be at least this long (1 = all
     // look the same way): below it the capture is not one looking down, and
     // there is no up to hold heights along.
@@ -75,6 +82,47 @@ inline int levelFlightFactors(const std::vector<PosedImage>& imgs, const LevelFl
         gx[i] = c.dot(e1);
         gy[i] = c.dot(e2);
     }
+    auto seqOf = [&](size_t i) {
+        const uint32_t id = imgs[i].image;
+        return id < opt.sequence.size() ? opt.sequence[id] : -1;
+    };
+    // Direction of travel: the shorter step to the posed cameras before and after
+    // in the sequence, which at a line's end is along its own line, not the jump
+    // to the next; (0, 0) when it has neither.
+    std::vector<std::pair<double, double>> dir(n, {0.0, 0.0});
+    {
+        std::vector<std::pair<int, size_t>> bySeq;
+        for (size_t i = 0; i < n; i++)
+            if (seqOf(i) >= 0) bySeq.push_back({seqOf(i), i});
+        std::sort(bySeq.begin(), bySeq.end());
+        for (size_t k = 0; k < bySeq.size(); k++) {
+            const size_t i = bySeq[k].second;
+            double best = 0, bx = 0, by = 0;
+            for (int side = -1; side <= 1; side += 2) {
+                const long m = (long)k + side;
+                if (m < 0 || m >= (long)bySeq.size()) continue;
+                const size_t j = bySeq[(size_t)m].second;
+                const double dx = (gx[j] - gx[i]) * side, dy = (gy[j] - gy[i]) * side;
+                const double d = std::hypot(dx, dy);
+                if (d > 0 && (best == 0 || d < best)) {
+                    best = d;
+                    bx = dx / d;
+                    by = dy / d;
+                }
+            }
+            dir[i] = {bx, by};
+        }
+    }
+    // Another pass: far enough apart in the sequence, and to the side of this
+    // camera's track rather than ahead of or behind it on its own line.
+    auto otherPass = [&](size_t i, size_t j) {
+        const int a = seqOf(i), b = seqOf(j);
+        if (a < 0 || b < 0) return true;
+        if (std::abs(a - b) <= opt.min_gap) return false;
+        const double dx = gx[j] - gx[i], dy = gy[j] - gy[i], d = std::hypot(dx, dy);
+        const double side = std::fabs(dir[i].first * dy - dir[i].second * dx);
+        return dir[i] == std::make_pair(0.0, 0.0) || side >= 0.5 * d;
+    };
     // Nearest neighbours over the ground, both orderings of a pair kept once.
     std::vector<std::pair<size_t, size_t>> pairs;
     std::vector<double> dist;
@@ -83,7 +131,8 @@ inline int levelFlightFactors(const std::vector<PosedImage>& imgs, const LevelFl
     for (size_t i = 0; i < n; i++) {
         cand.clear();
         for (size_t j = 0; j < n; j++)
-            if (j != i) cand.push_back({std::hypot(gx[j] - gx[i], gy[j] - gy[i]), j});
+            if (j != i && otherPass(i, j))
+                cand.push_back({std::hypot(gx[j] - gx[i], gy[j] - gy[i]), j});
         const size_t k = std::min(cand.size(), (size_t)opt.neighbours);
         std::partial_sort(cand.begin(), cand.begin() + k, cand.end());
         nn[i] = k ? cand[0].first : 0.0;
