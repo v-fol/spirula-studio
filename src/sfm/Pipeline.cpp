@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -57,6 +58,7 @@
 #include "sfm/geometry/TwoView.h"
 #include "sfm/map/Assemble.h"
 #include "sfm/map/AttitudeGauge.h"
+#include "sfm/map/LevelFlightPriors.h"
 #include "sfm/map/Mapper.h"
 #include "sfm/map/MetricGauge.h"
 #include "sfm/map/Orient.h"
@@ -2653,7 +2655,19 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         return r;
     }
     PriorSource* mapped = cfg.sensor_map ? calib.positionPriors() : nullptr;
-    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs, mapped);
+    // The mapper's solves only: the gauge below keeps the sources' own frames.
+    std::unique_ptr<LevelFlightPriors> level_flight;
+    if (in.level_flight > 0) {
+        LevelFlightOptions lo;
+        lo.slope = in.level_flight;
+        level_flight = std::make_unique<LevelFlightPriors>(mapped, lo);
+        if (verbose)
+            std::printf("[map]     Level flight: camera heights tied to their %d nearest neighbours "
+                        "over the ground, sigma %.3f per unit of distance\n",
+                        lo.neighbours, lo.slope);
+    }
+    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs,
+                  level_flight ? static_cast<PriorSource*>(level_flight.get()) : mapped);
     AssembleStats ast;
     std::vector<Reconstruction> models = runMapper(mapper, db, feats, cfg, ast);
     double t_map = now() - t0;
@@ -2907,6 +2921,16 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
         if (a == "--rolling-shutter-images") {
             if (i + 1 >= argc) return "--rolling-shutter-images: missing value";
             out.in.rolling_shutter_images = args[(size_t)++i];
+            continue;
+        }
+        if (a == "--level-flight") {
+            if (i + 1 >= argc) return "--level-flight: missing value";
+            const std::string v = args[(size_t)++i];
+            char* end = nullptr;
+            const double slope = std::strtod(v.c_str(), &end);
+            if (end == v.c_str() || *end != '\0' || !(slope >= 0) || slope > 1)
+                return "--level-flight: expected a slope between 0 and 1, got '" + v + "'";
+            out.in.level_flight = slope;
             continue;
         }
         // Claimed, not merely cleared: manifest_apply fills in anything the

@@ -162,6 +162,10 @@ static void ownOptionsAuto(FILE* out) {
     helpLine(out, "--rolling-shutter-images DIR", "",
              "With --rolling-shutter, also write the photos resampled without the distortion, for "
              "training and for other tools");
+    helpLine(out, "--level-flight SLOPE", "",
+             "Hold each camera's height to its nearest neighbours over the ground while mapping, "
+             "SLOPE sigma per unit of distance (0.02: 1 m over 50 m); for aircraft that keep their "
+             "altitude, without GPS");
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
