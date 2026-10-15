@@ -65,6 +65,9 @@
 
 // `spirula-sfm ba`, in sfm_ba.cpp. It prints its own help.
 int cmdBa(int argc, char** argv);
+// `spirula-sfm rs`, in sfm_rs.cpp. It prints its own help.
+int cmdRs(int argc, char** argv);
+void printRsHelp(FILE* out);
 void printBaHelp(FILE* out);
 
 // Set by the build (cmake/SsOptions.cmake reads it from pyproject.toml).
@@ -153,6 +156,16 @@ static void ownOptionsAuto(FILE* out) {
     helpLine(out, "--sequence PREFIX[,PREFIX...]", "", H::opt_sequence.get());
     helpLine(out, "--no-masks", "", H::opt_no_masks.get());
     helpLine(out, "--no-manage", "", H::opt_no_manage_auto.get());
+    helpLine(out, "--rolling-shutter", "",
+             "Estimate each photo's rolling-shutter distortion from its neighbours and remove it from "
+             "the keypoints before matching; for sequences shot roughly straight down (spirula-sfm rs)");
+    helpLine(out, "--rolling-shutter-images DIR", "",
+             "With --rolling-shutter, also write the photos resampled without the distortion, for "
+             "training and for other tools");
+    helpLine(out, "--level-flight SLOPE", "",
+             "Hold each camera's height to its nearest neighbours over the ground while mapping, "
+             "SLOPE sigma per unit of distance (0.02: 1 m over 50 m); for aircraft that keep their "
+             "altitude, without GPS");
     helpLine(out, "--progress-dir DIR", "", H::opt_progress_dir.get());
     helpLine(out, "-h, --help", "", H::opt_help.get());
 }
@@ -1271,6 +1284,7 @@ int spirula_sfm_main(int argc, char** argv) {
         // `spirula-sfm help <command>` is the same as `<command> --help`.
         if (argc > 2) {
             if (std::string(argv[2]) == "ba") { printBaHelp(stdout); return 0; }
+            if (std::string(argv[2]) == "rs") { printRsHelp(stdout); return 0; }
             if (const CommandInfo* c = findCommand(argv[2])) { printCommandHelp(*c); return 0; }
             std::fprintf(stderr, "%s: error: unknown command '%s'\n", kProgram, argv[2]);
             return 1;
@@ -1293,6 +1307,7 @@ int spirula_sfm_main(int argc, char** argv) {
         if (cmd == "map") return cmdMap(argc - 2, argv + 2);
         if (cmd == "merge") return cmdMerge(argc - 2, argv + 2);
         if (cmd == "ba") return cmdBa(argc - 2, argv + 2);
+        if (cmd == "rs") return cmdRs(argc - 2, argv + 2);
     } catch (const sfm::Cancelled&) {
         L::err(Tag::Run, M::run_cancelled);
         return 130;   // the shell's convention for SIGINT, 128 + 2

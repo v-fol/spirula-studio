@@ -133,7 +133,8 @@ if(SS_BUILD_SFM)
     # nothing with the training engine.
     list(APPEND SS_TOOL_SOURCES
          ${SS_SRC}/app/cli/sfm_main.cpp
-         ${SS_SRC}/app/cli/sfm_ba.cpp)
+         ${SS_SRC}/app/cli/sfm_ba.cpp
+         ${SS_SRC}/app/cli/sfm_rs.cpp)
     list(APPEND SS_TOOL_DEFS SS_TOOL_SFM=1)
     list(APPEND SS_TOOL_LIBS ss_sfm)
 endif()
@@ -352,7 +353,7 @@ if(SS_SEPARATE_TOOLS)
 
     if(SS_BUILD_SFM)
         ss_tool_exe(spirula-sfm
-            "${SS_SRC}/app/cli/sfm_main.cpp;${SS_SRC}/app/cli/sfm_ba.cpp"
+            "${SS_SRC}/app/cli/sfm_main.cpp;${SS_SRC}/app/cli/sfm_ba.cpp;${SS_SRC}/app/cli/sfm_rs.cpp"
             "SS_TOOL_SFM=1" "ss_sfm")
     endif()
     if(SS_BUILD_SAM)

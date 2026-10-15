@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -57,9 +58,11 @@
 #include "sfm/geometry/TwoView.h"
 #include "sfm/map/Assemble.h"
 #include "sfm/map/AttitudeGauge.h"
+#include "sfm/map/LevelFlightPriors.h"
 #include "sfm/map/Mapper.h"
 #include "sfm/map/MetricGauge.h"
 #include "sfm/map/Orient.h"
+#include "sfm/rs/Apply.h"
 #include "sfm/map/SensorGauge.h"
 #include "sfm/map/Merge.h"
 
@@ -2465,6 +2468,37 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
                 {(long long)est.images, (long long)(est.images * (est.images - 1) / 2)});
     }
 
+    // ---- 1b. rolling shutter: keypoints corrected in place, once ----
+    if (in.rolling_shutter && rs::alreadyApplied(featdir.string()) && est.reused != est.images) {
+        std::fprintf(stderr, "%s holds corrected and freshly extracted features; run again with "
+                             "--reuse-features redo\n", featdir.string().c_str());
+        { r.exit_code = 1; return r; }
+    }
+    if (in.rolling_shutter && !rs::alreadyApplied(featdir.string())) {
+        std::vector<FeatureSet> raw_feats;
+        MatchesDatabase raw;
+        MatchStats raw_stats;
+        VerifyCalibration raw_calib;
+        raw_calib.setup = cfg.camera;
+        const SensorCaptures raw_sensors = loadSensorCaptures(cfg, false);
+        raw_calib.sensors = &raw_sensors;
+        if (int rc = matchFeatureDir(featdir.string(), cfg, mode, /*verify=*/false, raw_feats, raw,
+                                     raw_stats, &raw_calib)) {
+            r.exit_code = rc;
+            return r;
+        }
+        raw_feats.clear();
+        rs::Options rs_opt;
+        rs_opt.threads = cfg.threads;
+        std::string rs_err;
+        if (!rs::applyToFeatureDir(raw, featdir.string(), featdir.string(), rs_opt, _imagedir,
+                                   in.rolling_shutter_images, 95, verbose ? stdout : nullptr,
+                                   rs_err)) {
+            std::fprintf(stderr, "rolling shutter: %s\n", rs_err.c_str());
+            { r.exit_code = 2; return r; }
+        }
+    }
+
     // ---- 2. match + geometric verification ----
     t0 = now();
     std::vector<FeatureSet> feats;
@@ -2621,7 +2655,29 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         return r;
     }
     PriorSource* mapped = cfg.sensor_map ? calib.positionPriors() : nullptr;
-    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs, mapped);
+    // The mapper's solves only: the gauge below keeps the sources' own frames.
+    std::unique_ptr<LevelFlightPriors> level_flight;
+    if (in.level_flight > 0) {
+        LevelFlightOptions lo;
+        lo.slope = in.level_flight;
+        // Shooting order is the natural order of the file names, as for the
+        // rolling-shutter stage.
+        std::vector<int> order(db.images.size());
+        for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return rs::naturalLess(db.images[a].name, db.images[b].name);
+        });
+        lo.sequence.assign(order.size(), -1);
+        for (size_t s = 0; s < order.size(); s++) lo.sequence[order[s]] = (int)s;
+        level_flight = std::make_unique<LevelFlightPriors>(mapped, lo);
+        if (verbose)
+            std::printf("[map]     Level flight: camera heights tied to their %d nearest neighbours "
+                        "over the ground from other passes (over %d photos apart), sigma %.3f per "
+                        "unit of distance\n",
+                        lo.neighbours, lo.min_gap, lo.slope);
+    }
+    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs,
+                  level_flight ? static_cast<PriorSource*>(level_flight.get()) : mapped);
     AssembleStats ast;
     std::vector<Reconstruction> models = runMapper(mapper, db, feats, cfg, ast);
     double t_map = now() - t0;
@@ -2780,6 +2836,9 @@ void RunContext::set_progress_dir(const std::string& dir) { progress::set_dir(di
 
 namespace {
 
+// --max-error under --rolling-shutter unless given.
+constexpr double kRollingShutterMaxError = 10.0;
+
 // --camera-model / --focal / --distortion: a bare value sets the dataset-wide
 // default (which is a table field), PREFIX=VALUE names one camera group
 // (which is not).
@@ -2868,6 +2927,25 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
             out.progress_dir = args[(size_t)++i];
             continue;
         }
+        if (a == "--rolling-shutter") {
+            out.in.rolling_shutter = true;
+            continue;
+        }
+        if (a == "--rolling-shutter-images") {
+            if (i + 1 >= argc) return "--rolling-shutter-images: missing value";
+            out.in.rolling_shutter_images = args[(size_t)++i];
+            continue;
+        }
+        if (a == "--level-flight") {
+            if (i + 1 >= argc) return "--level-flight: missing value";
+            const std::string v = args[(size_t)++i];
+            char* end = nullptr;
+            const double slope = std::strtod(v.c_str(), &end);
+            if (end == v.c_str() || *end != '\0' || !(slope >= 0) || slope > 1)
+                return "--level-flight: expected a slope between 0 and 1, got '" + v + "'";
+            out.in.level_flight = slope;
+            continue;
+        }
         // Claimed, not merely cleared: manifest_apply fills in anything the
         // command line did not claim, and a manifest naming a mask_dir would
         // otherwise hand the masks back to a run that just refused them.
@@ -2914,6 +2992,17 @@ std::string parse_auto_args(const std::vector<std::string>& args, AutoRequest& o
         if (std::string err = manifest_apply(man, cfg, seen, imagedir); !err.empty())
             return manifest_path + ": " + err;
         if (!man.mask_dir.empty()) maskdir_explicit = true;
+    }
+    // The correction leaves each photo a few px off, alike along a pass and not between passes:
+    // at 3 px the mapper dropped the matches between neighbouring passes and they drifted apart
+    // in height by metres (docs/notes/rolling-shutter.md, "Inlier radius").
+    if (out.in.rolling_shutter && !seen.count("max-error") &&
+        cfg.max_error < kRollingShutterMaxError) {
+        char was[32], to[32];
+        std::snprintf(was, sizeof was, "%g", cfg.max_error);
+        std::snprintf(to, sizeof to, "%g", kRollingShutterMaxError);
+        moved.push_back({"max-error", was, to});
+        cfg.max_error = kRollingShutterMaxError;
     }
     if (std::string err = cfg.finalize(CMD_AUTO); !err.empty()) return err;
     if (std::string err = cfg.resolveDevice(); !err.empty()) return err;
